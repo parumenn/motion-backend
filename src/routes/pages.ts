@@ -315,6 +315,55 @@ router.post('/:id/restore', authenticateToken, requireWriteAccess, async (req, r
   }
 });
 
+// ゴミ箱の有効期限 (R2-6)：削除からこの日数を経過したページは自動で完全削除される。
+// 手動パージ (POST /trash/purge) は即時実行、定期パージは下記のタイマーで24時間ごとに実行する。
+// 起動直後には実行しない：初回は起動24時間後とし、デプロイ時点で既に期限切れのページが
+// ある場合でも、朝の報告でユーザーへ通知する猶予を残す。アップロード画像ファイル自体は
+// 手動の完全削除と同様に残る（孤立ファイルの掃除は別課題として残す）。
+const TRASH_RETENTION_DAYS = 30;
+const TRASH_PURGE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+async function purgeExpiredTrash(userId?: string): Promise<number> {
+  const result = userId
+    ? await pool.query(
+        `DELETE FROM pages WHERE user_id = $1 AND deleted_at IS NOT NULL
+         AND deleted_at < NOW() - ($2 || ' days')::interval`,
+        [userId, String(TRASH_RETENTION_DAYS)]
+      )
+    : await pool.query(
+        `DELETE FROM pages WHERE deleted_at IS NOT NULL
+         AND deleted_at < NOW() - ($1 || ' days')::interval`,
+        [String(TRASH_RETENTION_DAYS)]
+      );
+  return result.rowCount ?? 0;
+}
+
+// 定期パージ：初回は起動24時間後（上記の猶予のため）、以後24時間ごと。
+// 失敗してもサーバーは落とさず、次回に再試行する。
+setTimeout(() => {
+  purgeExpiredTrash()
+    .then(count => console.log(`Trash purge: ${count} expired pages removed`))
+    .catch(err => console.error('Trash purge error:', err));
+  setInterval(() => {
+    purgeExpiredTrash()
+      .then(count => console.log(`Trash purge: ${count} expired pages removed`))
+      .catch(err => console.error('Trash purge error:', err));
+  }, TRASH_PURGE_INTERVAL_MS);
+}, TRASH_PURGE_INTERVAL_MS);
+
+// 期限切れゴミ箱ページの手動パージ (APIキー不可)
+// 自分のゴミ箱のうち、削除から30日を経過したものだけを完全削除する。
+router.post('/trash/purge', authenticateToken, requireWriteAccess, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const purged = await purgeExpiredTrash(userId);
+    res.json({ message: '期限切れのゴミ箱ページを削除しました', purged, retentionDays: TRASH_RETENTION_DAYS });
+  } catch (error) {
+    console.error('Trash purge error:', error);
+    res.status(500).json({ error: 'パージエラー' });
+  }
+});
+
 // ゴミ箱からの完全削除 (APIキー不可)
 // 対象ページとその子孫を完全に DELETE する。通常ページ（ゴミ箱外）の完全消去はできない。
 router.delete('/:id/permanent', authenticateToken, requireWriteAccess, async (req, res) => {
