@@ -111,6 +111,7 @@ router.post('/', authenticateToken, requireScope('write:pages'), async (req, res
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
+    console.error('Create page error:', error);
     res.status(500).json({ error: '作成エラー' });
   }
 });
@@ -147,6 +148,7 @@ router.post('/reorder', authenticateToken, requireScope('write:pages'), async (r
     res.json({ ok: true });
   } catch (error) {
     await client.query('ROLLBACK');
+    console.error('Reorder error:', error);
     res.status(500).json({ error: '並び替えエラー' });
   } finally {
     client.release();
