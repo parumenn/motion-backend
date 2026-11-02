@@ -2,7 +2,7 @@ import express from 'express';
 import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
-import { authenticateToken } from '../middleware/auth';
+import { authenticateToken, requireWriteAccess } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -22,8 +22,8 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 500 * 1024 * 1024 } }); // 500MB上限
 
-// 画像アップロード
-router.post('/', authenticateToken, upload.single('image'), (req, res) => {
+// 画像アップロード (APIキー不可)
+router.post('/', authenticateToken, requireWriteAccess, upload.single('image'), (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'ファイルがありません' });
     
@@ -35,8 +35,8 @@ router.post('/', authenticateToken, upload.single('image'), (req, res) => {
   }
 });
 
-// 画像削除
-router.delete('/:filename', authenticateToken, (req, res) => {
+// 画像削除 (APIキー不可)
+router.delete('/:filename', authenticateToken, requireWriteAccess, (req, res) => {
   try {
     const filePath = path.join(uploadDir, req.params.filename);
     if (fs.existsSync(filePath)) {
@@ -49,3 +49,4 @@ router.delete('/:filename', authenticateToken, (req, res) => {
 });
 
 export default router;
+
