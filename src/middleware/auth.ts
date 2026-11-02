@@ -62,12 +62,26 @@ export const authenticateToken = async (req: Request, res: Response, next: NextF
   });
 };
 
-// APIキーによる書き込み・制限エンドポイントをブロックする関所
+// APIキーによるアクセスを全面的に禁止する関所 (DELETE や uploads 用)
 export const requireWriteAccess = (req: Request, res: Response, next: NextFunction) => {
   const user = (req as any).user;
   if (user && user.isApiKey) {
     return res.status(403).json({ error: 'APIキーではこの操作を実行する権限がありません' });
   }
   next();
+};
+
+// APIキーに特定のスコープを要求する関所 (POST, PUT用)
+export const requireScope = (requiredScope: string) => {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const user = (req as any).user;
+    // APIキーの場合のみスコープを検証 (JWTの場合は常に許可)
+    if (user && user.isApiKey) {
+      if (!user.scopes || !user.scopes.includes(requiredScope)) {
+        return res.status(403).json({ error: `${requiredScope} スコープが許可されていません` });
+      }
+    }
+    next();
+  };
 };
 

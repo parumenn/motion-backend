@@ -1,6 +1,6 @@
 import express from 'express';
 import { pool } from '../db';
-import { authenticateToken, requireWriteAccess } from '../middleware/auth';
+import { authenticateToken, requireWriteAccess, requireScope } from '../middleware/auth';
 import { convertBlocksToMarkdown } from '../utils/markdown';
 
 const router = express.Router();
@@ -83,8 +83,8 @@ router.get('/:id', authenticateToken, async (req, res) => {
   }
 });
 
-// ページの新規作成 (APIキー不可)
-router.post('/', authenticateToken, requireWriteAccess, async (req, res) => {
+// ページの新規作成 (APIキーは write:pages スコープが必要)
+router.post('/', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
     const { id, title, parentId, blocks, isLocked, passwordHash } = req.body;
@@ -99,8 +99,8 @@ router.post('/', authenticateToken, requireWriteAccess, async (req, res) => {
   }
 });
 
-// ページの更新 (自動保存用 / APIキー不可)
-router.put('/:id', authenticateToken, requireWriteAccess, async (req, res) => {
+// ページの更新 (自動保存用 / APIキーは write:pages スコープが必要)
+router.put('/:id', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
     const { title, parentId, blocks, isLocked, passwordHash } = req.body;

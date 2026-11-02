@@ -3,8 +3,7 @@ import { pool } from '../src/db';
 
 async function generateApiKey() {
   try {
-    // 1. api_keys テーブルの作成
-    // 確認済み: users.id は UUID 型（2026-11-02 に実環境で確認）。
+    // 1. api_keys テーブルの作成 (users.id が UUID である前提)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS api_keys (
         id SERIAL PRIMARY KEY,
@@ -29,9 +28,9 @@ async function generateApiKey() {
     const randomBytes = crypto.randomBytes(32).toString('base64url').replace(/[^a-zA-Z0-9]/g, '');
     const apiKey = `motion_live_${randomBytes}`;
     
-    // 4. ハッシュ化とデータベース登録
+    // 4. ハッシュ化とデータベース登録 (read:pages と write:pages の両方を付与)
     const keyHash = crypto.createHash('sha256').update(apiKey).digest('hex');
-    const scopes = ['read:pages'];
+    const scopes = ['read:pages', 'write:pages'];
 
     await pool.query(
       'INSERT INTO api_keys (user_id, key_hash, scopes) VALUES ($1, $2, $3)',
