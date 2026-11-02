@@ -46,6 +46,51 @@ router.get('/', authenticateToken, async (req, res) => {
   }
 });
 
+// 全文検索 (R2-2)：一覧 API は blocks を含まないため、未読込ページの本文は
+// フロントの検索で拾えない。タイトル＋blocks 全文をサーバー側で検索する。
+// '/:id' より前に登録すること（'/search' が id='search' と解釈されるのを防ぐ）。
+router.get('/search', authenticateToken, async (req, res) => {
+  try {
+    const user = (req as any).user;
+
+    // APIキーの場合はスコープを確認
+    if (user.isApiKey && (!user.scopes || !user.scopes.includes('read:pages'))) {
+      return res.status(403).json({ error: 'read:pages スコープが許可されていません' });
+    }
+
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json([]);
+
+    // ILIKE のワイルドカード文字をエスケープ
+    const escaped = q.replace(/\\/g, '\\\\').replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const pattern = `%${escaped}%`;
+
+    const result = await pool.query(
+      `SELECT id, parent_id, title, is_locked, blocks FROM pages
+       WHERE user_id = $1 AND deleted_at IS NULL
+       AND (title ILIKE $2 ESCAPE '\\' OR blocks::text ILIKE $2 ESCAPE '\\')
+       ORDER BY sort_order ASC, created_at ASC LIMIT 50`,
+      [user.userId, pattern]
+    );
+
+    res.json(result.rows.map((row: any) => {
+      let blocks = row.blocks;
+      if (typeof blocks === 'string') {
+        try { blocks = JSON.parse(blocks); } catch (e) { blocks = []; }
+      }
+      return {
+        id: row.id,
+        parent_id: row.parent_id,
+        title: row.title,
+        is_locked: row.is_locked,
+        blocks: Array.isArray(blocks) ? blocks : [],
+      };
+    }));
+  } catch (error) {
+    res.status(500).json({ error: '検索エラー' });
+  }
+});
+
 // ページ詳細の取得 (エディタを開いたとき用)
 // ゴミ箱内のページは ?includeDeleted=true がない限り 404 とする。
 router.get('/:id', authenticateToken, async (req, res) => {
