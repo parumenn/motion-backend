@@ -2,6 +2,7 @@ import express from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { pool } from '../db';
+import { authenticateToken, requireWriteAccess } from '../middleware/auth';
 
 const router = express.Router();
 
@@ -132,6 +133,59 @@ router.post('/login', async (req, res) => {
       token, 
       user: { id: user.id, email: user.email, role: user.role } 
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'サーバーエラーが発生しました' });
+  }
+});
+
+// 3. 設定の端末間同期 API (GET/PUT /api/auth/prefs) — R2-8
+// フロントの savePrefs が扱うキーだけを許可する。
+// 未知キーを黙って捨てると将来の不整合の原因になるため、未知キーがあれば 400 を返す。
+// JWT のみ（requireWriteAccess が APIキーを 403 で弾く）。PUT はキー単位マージで、
+// 片方の端末だけが送ったキーが他方のキーで上書き消去されないようにする。
+const PREF_KEYS = ['theme', 'image_quality', 'show_locked', 'search_locked'] as const;
+
+router.get('/prefs', authenticateToken, requireWriteAccess, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const result = await pool.query('SELECT prefs FROM users WHERE id = $1', [userId]);
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'ユーザーが見つかりません' });
+    }
+    res.json({ prefs: result.rows[0].prefs || {} });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'サーバーエラーが発生しました' });
+  }
+});
+
+router.put('/prefs', authenticateToken, requireWriteAccess, async (req, res) => {
+  try {
+    const userId = (req as any).user.userId;
+    const incoming = req.body?.prefs;
+    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+      return res.status(400).json({ error: 'prefs オブジェクトを指定してください' });
+    }
+    const updates: Record<string, string> = {};
+    for (const key of Object.keys(incoming)) {
+      if (!(PREF_KEYS as readonly string[]).includes(key)) {
+        return res.status(400).json({ error: `未知の設定キーです: ${key}` });
+      }
+      const value = incoming[key];
+      if (typeof value !== 'string' || value.length > 100) {
+        return res.status(400).json({ error: `設定値が不正です: ${key}` });
+      }
+      updates[key] = value;
+    }
+    const result = await pool.query(
+      'UPDATE users SET prefs = COALESCE(prefs, \'{}\'::jsonb) || $2::jsonb WHERE id = $1 RETURNING prefs',
+      [userId, JSON.stringify(updates)]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'ユーザーが見つかりません' });
+    }
+    res.json({ prefs: result.rows[0].prefs });
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'サーバーエラーが発生しました' });
