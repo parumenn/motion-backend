@@ -22,11 +22,11 @@ router.get('/', authenticateToken, async (req, res) => {
     // 並び順は sort_order 順（同値の場合は作成順で安定させる）
     const result = includeDeleted
       ? await pool.query(
-          'SELECT id, parent_id, title, is_locked, password_hash, deleted_at, sort_order FROM pages WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC',
+          'SELECT id, parent_id, title, is_locked, password_hash, deleted_at, sort_order, revision FROM pages WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC',
           [userId]
         )
       : await pool.query(
-          'SELECT id, parent_id, title, is_locked, password_hash, sort_order FROM pages WHERE user_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC, created_at ASC',
+          'SELECT id, parent_id, title, is_locked, password_hash, sort_order, revision FROM pages WHERE user_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC, created_at ASC',
           [userId]
         );
 
@@ -213,43 +213,62 @@ router.post('/reorder', authenticateToken, requireScope('write:pages'), async (r
 
 // ページの更新 (自動保存用 / APIキーは write:pages スコープが必要)
 // ゴミ箱内のページへの更新は 410 とし、自動保存がゴミ箱ページを蘇らせないようにする。
-// 楽観ロック (#5)：フロントが expectedUpdatedAt（ページ読込時の updated_at）を送った場合、
-// それと一致する行だけ更新する。一致しない場合は上書きせず 409 を返し、現在の updated_at
-// を currentUpdatedAt として返す。expectedUpdatedAt を省略したクライアント（APIキー経由の
-// 既存ツール等）は従来どおり無条件で更新する（後方互換）。
+// 楽観ロック (#5, R2-9)：フロントが expectedRevision（ページ読込時の revision）を送った
+// 場合、それと一致する行だけ更新し、成功時は revision を +1 する。整数比較のため、
+// #5 で残った同一ミリ秒ウィンドウは存在しない。expectedRevision がない場合は従来の
+// expectedUpdatedAt によるミリ秒比較（後方互換）、両方とも省略したクライアント
+// （APIキー経由の既存ツール等）は従来どおり無条件で更新する。どの経路でも成功時は
+// revision が +1 されるため、revision は単調に増加する。409 時は currentUpdatedAt
+// に加えて currentRevision も返す。
 router.put('/:id', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
-    const { title, parentId, blocks, isLocked, passwordHash, sortOrder, expectedUpdatedAt } = req.body;
+    const { title, parentId, blocks, isLocked, passwordHash, sortOrder, expectedUpdatedAt, expectedRevision } = req.body;
+
+    // expectedRevision が送られた場合は整数でなければならない（型不正は 400）
+    const useRevision = expectedRevision !== undefined && expectedRevision !== null;
+    if (useRevision && (!Number.isInteger(expectedRevision) || expectedRevision < 0)) {
+      return res.status(400).json({ error: 'expectedRevision は 0 以上の整数で指定してください' });
+    }
 
     // sortOrder を省略した場合は既存値を維持する（自動保存の PUT で順序が初期化されないように）。
-    // ※ DB の updated_at はマイクロ秒精度だが、JS の Date / JSON 経由ではミリ秒に
-    //   切り捨てられるため、両辺をミリ秒に切り捨てて比較する（同一ミリ秒内の
-    //   連続更新という極めて狭い競合ウィンドウは残るが、実用上は無視できる）。
-    const result = expectedUpdatedAt
-      ? await pool.query(
-          "UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL AND date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $9::timestamptz) RETURNING *",
-          [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId, expectedUpdatedAt]
-        )
-      : await pool.query(
-          'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL RETURNING *',
-          [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId]
-        );
+    const baseSet = 'title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP, revision = revision + 1';
+    const baseParams = [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId];
+    let result;
+    if (useRevision) {
+      result = await pool.query(
+        `UPDATE pages SET ${baseSet} WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL AND revision = $9 RETURNING *`,
+        [...baseParams, expectedRevision]
+      );
+    } else if (expectedUpdatedAt) {
+      // ※ DB の updated_at はマイクロ秒精度だが、JS の Date / JSON 経由ではミリ秒に
+      //   切り捨てられるため、両辺をミリ秒に切り捨てて比較する（後方互換経路のみ）。
+      result = await pool.query(
+        `UPDATE pages SET ${baseSet} WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL AND date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $9::timestamptz) RETURNING *`,
+        [...baseParams, expectedUpdatedAt]
+      );
+    } else {
+      result = await pool.query(
+        `UPDATE pages SET ${baseSet} WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL RETURNING *`,
+        baseParams
+      );
+    }
     if (result.rows.length > 0) return res.json(result.rows[0]);
 
     // 更新対象がない場合：ゴミ箱内なら 410、楽観ロックの不一致なら 409、
     // それ以外は 404（フロントは新規作成へ進む）
     const existing = await pool.query(
-      'SELECT deleted_at, updated_at FROM pages WHERE id = $1 AND user_id = $2',
+      'SELECT deleted_at, updated_at, revision FROM pages WHERE id = $1 AND user_id = $2',
       [req.params.id, userId]
     );
     if (existing.rows.length > 0 && existing.rows[0].deleted_at !== null) {
       return res.status(410).json({ error: 'このページはゴミ箱にあります' });
     }
-    if (expectedUpdatedAt && existing.rows.length > 0) {
+    if ((useRevision || expectedUpdatedAt) && existing.rows.length > 0) {
       return res.status(409).json({
         error: '競合：他の端末で更新されました。上書きせず保存を中断しました',
         currentUpdatedAt: existing.rows[0].updated_at,
+        currentRevision: existing.rows[0].revision,
       });
     }
     return res.status(404).json({ error: 'ページが見つかりません' });
