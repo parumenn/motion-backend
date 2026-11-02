@@ -100,14 +100,25 @@ router.get('/:id', authenticateToken, async (req, res) => {
 
 // ページの新規作成 (APIキーは write:pages スコープが必要)
 // sortOrder を省略した場合は同じ親の中の末尾に自動配置する。
+// ※ 末尾番号の算出と INSERT を分けているのは、同一パラメータを
+//   複数箇所で使うと Postgres が型推論で 42P08 を返すため。
 router.post('/', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
     const { id, title, parentId, blocks, isLocked, passwordHash, sortOrder } = req.body;
 
+    let order = sortOrder ?? null;
+    if (order === null || order === undefined) {
+      const maxResult = await pool.query(
+        'SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM pages WHERE user_id = $1 AND parent_id IS NOT DISTINCT FROM $2 AND deleted_at IS NULL',
+        [userId, parentId]
+      );
+      order = maxResult.rows[0].next_order;
+    }
+
     const result = await pool.query(
-      'INSERT INTO pages (id, user_id, parent_id, title, blocks, is_locked, password_hash, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE user_id = $2 AND parent_id IS NOT DISTINCT FROM $3 AND deleted_at IS NULL))) RETURNING *',
-      [id, userId, parentId, title, JSON.stringify(blocks || []), isLocked, passwordHash, sortOrder ?? null]
+      'INSERT INTO pages (id, user_id, parent_id, title, blocks, is_locked, password_hash, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *',
+      [id, userId, parentId, title, JSON.stringify(blocks || []), isLocked, passwordHash, order]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
