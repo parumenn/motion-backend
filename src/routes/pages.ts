@@ -178,9 +178,12 @@ router.put('/:id', authenticateToken, requireScope('write:pages'), async (req, r
     const { title, parentId, blocks, isLocked, passwordHash, sortOrder, expectedUpdatedAt } = req.body;
 
     // sortOrder を省略した場合は既存値を維持する（自動保存の PUT で順序が初期化されないように）。
+    // ※ DB の updated_at はマイクロ秒精度だが、JS の Date / JSON 経由ではミリ秒に
+    //   切り捨てられるため、両辺をミリ秒に切り捨てて比較する（同一ミリ秒内の
+    //   連続更新という極めて狭い競合ウィンドウは残るが、実用上は無視できる）。
     const result = expectedUpdatedAt
       ? await pool.query(
-          'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL AND updated_at = $9::timestamptz RETURNING *',
+          "UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL AND date_trunc('milliseconds', updated_at) = date_trunc('milliseconds', $9::timestamptz) RETURNING *",
           [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId, expectedUpdatedAt]
         )
       : await pool.query(
