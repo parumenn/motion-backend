@@ -19,13 +19,14 @@ router.get('/', authenticateToken, async (req, res) => {
     const userId = user.userId;
     const includeDeleted = req.query.includeDeleted === 'true';
     // blocks（中身）は重いのでここでは取得しない
+    // 並び順は sort_order 順（同値の場合は作成順で安定させる）
     const result = includeDeleted
       ? await pool.query(
-          'SELECT id, parent_id, title, is_locked, password_hash, deleted_at FROM pages WHERE user_id = $1',
+          'SELECT id, parent_id, title, is_locked, password_hash, deleted_at, sort_order FROM pages WHERE user_id = $1 ORDER BY sort_order ASC, created_at ASC',
           [userId]
         )
       : await pool.query(
-          'SELECT id, parent_id, title, is_locked, password_hash FROM pages WHERE user_id = $1 AND deleted_at IS NULL',
+          'SELECT id, parent_id, title, is_locked, password_hash, sort_order FROM pages WHERE user_id = $1 AND deleted_at IS NULL ORDER BY sort_order ASC, created_at ASC',
           [userId]
         );
 
@@ -98,18 +99,57 @@ router.get('/:id', authenticateToken, async (req, res) => {
 });
 
 // ページの新規作成 (APIキーは write:pages スコープが必要)
+// sortOrder を省略した場合は同じ親の中の末尾に自動配置する。
 router.post('/', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
-    const { id, title, parentId, blocks, isLocked, passwordHash } = req.body;
+    const { id, title, parentId, blocks, isLocked, passwordHash, sortOrder } = req.body;
 
     const result = await pool.query(
-      'INSERT INTO pages (id, user_id, parent_id, title, blocks, is_locked, password_hash) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *',
-      [id, userId, parentId, title, JSON.stringify(blocks || []), isLocked, passwordHash]
+      'INSERT INTO pages (id, user_id, parent_id, title, blocks, is_locked, password_hash, sort_order) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM pages WHERE user_id = $2 AND parent_id IS NOT DISTINCT FROM $3 AND deleted_at IS NULL))) RETURNING *',
+      [id, userId, parentId, title, JSON.stringify(blocks || []), isLocked, passwordHash, sortOrder ?? null]
     );
     res.status(201).json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: '作成エラー' });
+  }
+});
+
+// 兄弟ページの並び替え（ドラッグ＆ドロップ／上下移動用）。
+// body: { parentId: string | null, orderedIds: string[] }（兄弟全員の順序）。
+// 対象がすべて同一ユーザ・同一親・ゴミ箱外であることを検証してから一括更新する。
+router.post('/reorder', authenticateToken, requireScope('write:pages'), async (req, res) => {
+  const userId = (req as any).user.userId;
+  const { parentId, orderedIds } = req.body;
+  if (!Array.isArray(orderedIds)) {
+    return res.status(400).json({ error: 'orderedIds が必要です' });
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query(
+      'SELECT id, parent_id FROM pages WHERE user_id = $1 AND id = ANY($2) AND deleted_at IS NULL',
+      [userId, orderedIds]
+    );
+    const sameParent = (p: string | null) =>
+      parentId === null || parentId === undefined ? p === null : p === parentId;
+    if (found.rows.length !== orderedIds.length || !found.rows.every(r => sameParent(r.parent_id))) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: '並び替え対象が不正です' });
+    }
+    for (let i = 0; i < orderedIds.length; i++) {
+      await client.query(
+        'UPDATE pages SET sort_order = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND user_id = $3',
+        [i, orderedIds[i], userId]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    res.status(500).json({ error: '並び替えエラー' });
+  } finally {
+    client.release();
   }
 });
 
@@ -118,11 +158,12 @@ router.post('/', authenticateToken, requireScope('write:pages'), async (req, res
 router.put('/:id', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
-    const { title, parentId, blocks, isLocked, passwordHash } = req.body;
+    const { title, parentId, blocks, isLocked, passwordHash, sortOrder } = req.body;
 
+    // sortOrder を省略した場合は既存値を維持する（自動保存の PUT で順序が初期化されないように）。
     const result = await pool.query(
-      'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 AND user_id = $7 AND deleted_at IS NULL RETURNING *',
-      [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, req.params.id, userId]
+      'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL RETURNING *',
+      [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId]
     );
     if (result.rows.length > 0) return res.json(result.rows[0]);
 
