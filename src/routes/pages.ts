@@ -168,28 +168,45 @@ router.post('/reorder', authenticateToken, requireScope('write:pages'), async (r
 
 // ページの更新 (自動保存用 / APIキーは write:pages スコープが必要)
 // ゴミ箱内のページへの更新は 410 とし、自動保存がゴミ箱ページを蘇らせないようにする。
+// 楽観ロック (#5)：フロントが expectedUpdatedAt（ページ読込時の updated_at）を送った場合、
+// それと一致する行だけ更新する。一致しない場合は上書きせず 409 を返し、現在の updated_at
+// を currentUpdatedAt として返す。expectedUpdatedAt を省略したクライアント（APIキー経由の
+// 既存ツール等）は従来どおり無条件で更新する（後方互換）。
 router.put('/:id', authenticateToken, requireScope('write:pages'), async (req, res) => {
   try {
     const userId = (req as any).user.userId;
-    const { title, parentId, blocks, isLocked, passwordHash, sortOrder } = req.body;
+    const { title, parentId, blocks, isLocked, passwordHash, sortOrder, expectedUpdatedAt } = req.body;
 
     // sortOrder を省略した場合は既存値を維持する（自動保存の PUT で順序が初期化されないように）。
-    const result = await pool.query(
-      'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL RETURNING *',
-      [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId]
-    );
+    const result = expectedUpdatedAt
+      ? await pool.query(
+          'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL AND updated_at = $9::timestamptz RETURNING *',
+          [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId, expectedUpdatedAt]
+        )
+      : await pool.query(
+          'UPDATE pages SET title = $1, parent_id = $2, blocks = $3, is_locked = $4, password_hash = $5, sort_order = COALESCE($6, sort_order), updated_at = CURRENT_TIMESTAMP WHERE id = $7 AND user_id = $8 AND deleted_at IS NULL RETURNING *',
+          [title, parentId, JSON.stringify(blocks), isLocked, passwordHash, sortOrder ?? null, req.params.id, userId]
+        );
     if (result.rows.length > 0) return res.json(result.rows[0]);
 
-    // 更新対象がない場合：ゴミ箱内なら 410、それ以外は 404（フロントは新規作成へ進む）
+    // 更新対象がない場合：ゴミ箱内なら 410、楽観ロックの不一致なら 409、
+    // それ以外は 404（フロントは新規作成へ進む）
     const existing = await pool.query(
-      'SELECT deleted_at FROM pages WHERE id = $1 AND user_id = $2',
+      'SELECT deleted_at, updated_at FROM pages WHERE id = $1 AND user_id = $2',
       [req.params.id, userId]
     );
     if (existing.rows.length > 0 && existing.rows[0].deleted_at !== null) {
       return res.status(410).json({ error: 'このページはゴミ箱にあります' });
     }
+    if (expectedUpdatedAt && existing.rows.length > 0) {
+      return res.status(409).json({
+        error: '競合：他の端末で更新されました。上書きせず保存を中断しました',
+        currentUpdatedAt: existing.rows[0].updated_at,
+      });
+    }
     return res.status(404).json({ error: 'ページが見つかりません' });
   } catch (error) {
+    console.error('Update page error:', error);
     res.status(500).json({ error: '更新エラー' });
   }
 });
