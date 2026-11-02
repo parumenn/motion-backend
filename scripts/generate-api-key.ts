@@ -4,12 +4,11 @@ import { pool } from '../src/db';
 async function generateApiKey() {
   try {
     // 1. api_keys テーブルの作成
-    // 前提: users.id が INTEGER 型であることを想定しています。
-    // UUID等の場合は "user_id INTEGER" を該当する型に修正してください。
+    // 確認済み: users.id は UUID 型（2026-11-02 に実環境で確認）。
     await pool.query(`
       CREATE TABLE IF NOT EXISTS api_keys (
         id SERIAL PRIMARY KEY,
-        user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+        user_id UUID REFERENCES users(id) ON DELETE CASCADE,
         key_hash VARCHAR(64) NOT NULL UNIQUE,
         scopes VARCHAR(255)[],
         last_used_at TIMESTAMP,
