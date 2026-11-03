@@ -5,6 +5,7 @@ import './db';
 import authRoutes from './routes/auth';
 import pageRoutes from './routes/pages'; // ★追加
 import uploadRoutes from './routes/uploads'; // ★追加
+import apiKeyRoutes from './routes/apiKeys';
 
 dotenv.config();
 
@@ -18,6 +19,7 @@ app.use('/uploads', express.static('uploads'));
 app.use('/api/auth', authRoutes);
 app.use('/api/pages', pageRoutes); // ★追加
 app.use('/api/uploads', uploadRoutes); // ★追加
+app.use('/api/api-keys', apiKeyRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', message: 'Motion Backend is running!' });
