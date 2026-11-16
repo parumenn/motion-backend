@@ -1,13 +1,16 @@
 import express from 'express';
 import crypto from 'crypto';
 import { pool } from '../db';
-import { authenticateToken, requireWriteAccess } from '../middleware/auth';
+import { authenticateToken, requireWriteAccess, requireStepUp } from '../middleware/auth';
 
 const router = express.Router();
 
 // APIキー管理は「人間のログインセッション（JWT）」専用にする。
 // authenticateToken で認証し、requireWriteAccess で APIキーによる呼び出しを 403 にする
 // （APIキー自身にキーの発行・失効をさせない）。
+// さらに発行・失効は永続的なアクセス手段の操作なので step-up 認証（直近5分以内の
+// 再認証）を必須とする。ルーター全体への適用ではなく POST 系だけに掛けるため、
+// ここでは認証のみを全体適用し、requireStepUp は各ルート側で付ける。
 router.use(authenticateToken, requireWriteAccess);
 
 // 発行するキーに付与するスコープ（発行スクリプト scripts/generate-api-key.ts と同一）
@@ -34,7 +37,7 @@ router.get('/', async (req, res) => {
 
 // 新しいAPIキーを発行する。平文キーはこのレスポンスで一度だけ返す
 // （サーバーには SHA-256 ハッシュしか保存されないため再表示は不可能）。
-router.post('/', async (req, res) => {
+router.post('/', requireStepUp, async (req, res) => {
   try {
     const userId = (req as any).user.userId;
     const rawName = (req.body as any)?.name;
@@ -61,7 +64,7 @@ router.post('/', async (req, res) => {
 });
 
 // APIキーを失効させる（削除はせず revoked_at を立てる。冪等）
-router.post('/:id/revoke', async (req, res) => {
+router.post('/:id/revoke', requireStepUp, async (req, res) => {
   try {
     const userId = (req as any).user.userId;
     const id = Number(req.params.id);
