@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { pool } from '../db';
-import { isStepUpFresh } from '../utils/authHelpers';
+import { isStepUpFresh, tokenFingerprint } from '../utils/authHelpers';
 
 // ログイン状態を確認する関所（ミドルウェア）
 export const authenticateToken = async (req: Request, res: Response, next: NextFunction) => {
@@ -123,7 +123,7 @@ export const requireStepUp = async (req: Request, res: Response, next: NextFunct
     return res.status(403).json({ error: 'この操作はログインセッションからのみ実行できます', code: 'step_up_required' });
   }
   try {
-    if (await isStepUpFresh(user.userId)) return next();
+    if (await isStepUpFresh(user.userId, tokenFingerprint(req))) return next();
   } catch (error) {
     console.error('step-up照合エラー:', error);
     return res.status(500).json({ error: '認証処理中にエラーが発生しました' });

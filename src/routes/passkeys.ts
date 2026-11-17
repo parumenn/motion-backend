@@ -365,7 +365,7 @@ router.post('/stepup/passkey/verify', ...jwtOnly, async (req, res) => {
       `UPDATE passkeys SET sign_count = $1, last_used_at = now() WHERE credential_id = $2 AND user_id = $3`,
       [authenticationInfo.newCounter, passkey.credential_id, user.id]
     );
-    await markStepUp(user.id);
+    await markStepUp(user.id, tokenFingerprint(req));
     return res.json({ ok: true });
   } catch (error) {
     console.error(error);

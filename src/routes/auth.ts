@@ -13,6 +13,8 @@ import {
   issueTokenForUser,
   bumpTokenVersion,
   markStepUp,
+  tokenFingerprint,
+  fingerprintOfToken,
 } from '../utils/authHelpers';
 
 const router = express.Router();
@@ -257,7 +259,7 @@ router.post('/password/change', authenticateToken, requireWriteAccess, async (re
     }
 
     const { token } = await issueTokenForUser({ id: userId, email: user.email, role: (req as any).user.role });
-    await markStepUp(userId);
+    await markStepUp(userId, fingerprintOfToken(token));
     return res.json({ ok: true, token });
   } catch (error) {
     console.error(error);
@@ -359,7 +361,7 @@ router.post('/stepup/password', authenticateToken, requireWriteAccess, async (re
     if (!(await verifyPassword(rows[0].password_hash, password))) {
       return res.status(401).json({ error: '現在のパスワードが正しくありません' });
     }
-    await markStepUp(userId);
+    await markStepUp(userId, tokenFingerprint(req));
     return res.json({ ok: true });
   } catch (error) {
     console.error(error);

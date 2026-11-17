@@ -74,14 +74,22 @@ export async function bumpTokenVersion(userId: string): Promise<void> {
 // ---- step-up 認証（マイボード assertStepUp / markStepUp 相当） ----
 export const STEP_UP_WINDOW_MS = 5 * 60 * 1000;
 
-export async function isStepUpFresh(userId: string): Promise<boolean> {
-  const { rows } = await pool.query(`SELECT last_stepup_at FROM users WHERE id = $1`, [userId]);
+export async function isStepUpFresh(userId: string, tokenFp?: string): Promise<boolean> {
+  const { rows } = await pool.query(`SELECT last_stepup_at, last_stepup_token_fp FROM users WHERE id = $1`, [userId]);
   if (rows.length === 0 || !rows[0].last_stepup_at) return false;
+  // step-up は再認証したトークン（セッション）本人だけに効かせる。
+  // ユーザ単位で共有すると、別セッションを乗っ取った攻撃者が正規ユーザの
+  // 再認証に相乗りできてしまうため、指紋が一致しない場合は fresh とみなさない。
+  if (!tokenFp || !rows[0].last_stepup_token_fp || rows[0].last_stepup_token_fp !== tokenFp) return false;
   return Date.now() - new Date(rows[0].last_stepup_at).getTime() <= STEP_UP_WINDOW_MS;
 }
 
-export async function markStepUp(userId: string): Promise<void> {
-  await pool.query(`UPDATE users SET last_stepup_at = now() WHERE id = $1`, [userId]);
+export async function markStepUp(userId: string, tokenFp?: string): Promise<void> {
+  await pool.query(`UPDATE users SET last_stepup_at = now(), last_stepup_token_fp = $2 WHERE id = $1`, [userId, tokenFp ?? null]);
+}
+
+export function fingerprintOfToken(token: string): string {
+  return sha256hex(token || '');
 }
 
 // JWT の指紋（チャレンジの発行元セッション紐付け用。マイボードの session_id 相当）
