@@ -14,6 +14,23 @@ import { startMailWorker, mailConfig } from './mail';
 dotenv.config();
 
 const app = express();
+app.disable('x-powered-by');
+
+// セキュリティヘッダー（ZAPスキャン 2026-11-17 対応）
+// API は JSON 返却のみなので CSP は最も厳しい形にする。
+// /uploads は画像の直表示で CSP が邪魔をするため対象外（nosniff は付ける）。
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  if (!req.path.startsWith('/uploads')) {
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  }
+  if (req.path.startsWith('/api/')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
 const PORT = process.env.PORT || 3000;
 
 // CORS は自サイトのみに絞る（従来は無制限だった。APIキー利用はサーバ間通信で
